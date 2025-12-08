@@ -4,6 +4,7 @@ import os
 import datetime
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
+import json
 
 # ---------- Google Sheets Setup ----------
 SHEET_ID = "1qPoJ0uBdVCQZMZYWRS6Bt60YjJnYUkD4OePSTRMiSrI"
@@ -13,7 +14,6 @@ scope = [
     "https://www.googleapis.com/auth/drive"
 ]
 
-import json
 google_creds_json = os.getenv("GOOGLE_CREDS")
 
 if google_creds_json:
@@ -26,7 +26,7 @@ client = gspread.authorize(creds)
 sheet = client.open_by_key(SHEET_ID)
 
 registered_users = set()
-submissions_today = set()
+submissions_today = {}  # store counts instead of just names
 
 # Validate Daily Sheet Name Function
 def is_valid_day_sheet(title):
@@ -36,7 +36,7 @@ def is_valid_day_sheet(title):
     except:
         return False
 
-# Load Registered Users from Sheet
+# Load Users
 def load_users():
     try:
         reg_sheet = sheet.worksheet("Registered_Users")
@@ -67,6 +67,7 @@ async def on_ready():
     print(f"Bot is online ✔ {bot.user}")
     daily_reminder.start()
 
+
 # ---------- Register ----------
 @bot.command()
 async def register(ctx):
@@ -83,17 +84,20 @@ async def register(ctx):
 
     await ctx.reply("✔ Registered Successfully!")
 
+
 # ---------- Submit ----------
 @bot.command()
 async def submit(ctx, *, problem_name="No Name"):
     if ctx.guild is not None:
-        return await ctx.reply("Submit in DM 😄")
+        return await ctx.reply("Submit only in DM 😄")
 
     if not ctx.message.attachments:
         return await ctx.reply("Attach screenshot!")
 
     uname = ctx.author.name
-    submissions_today.add(uname)
+
+    # Count submissions
+    submissions_today[uname] = submissions_today.get(uname, 0) + 1
 
     ws = get_today_sheet()
     ws.append_row([
@@ -103,19 +107,21 @@ async def submit(ctx, *, problem_name="No Name"):
         problem_name
     ])
 
-    await ctx.reply("🔥 Submission saved 💪")
+    await ctx.reply(f"🔥 Submission #{submissions_today[uname]} saved! 💪 Keep going!")
+
 
 # ---------- Status ----------
 @bot.command()
 async def status(ctx):
     if ctx.guild is not None:
-        return await ctx.reply("DM me 😄")
+        return await ctx.reply("Use in DM 😄")
 
     uname = ctx.author.name
     if uname in submissions_today:
-        await ctx.reply("✔ You submitted today! 🔥")
+        await ctx.reply(f"✔ You submitted {submissions_today[uname]} time(s) today! 🔥")
     else:
         await ctx.reply("❌ You haven't submitted yet 😬")
+
 
 # ---------- Summary ----------
 @bot.command()
@@ -136,7 +142,6 @@ async def summarize(ctx):
         sws = sheet.add_worksheet(title=sheet_title, rows=200, cols=4)
         sws.append_row(["Username", "Days Submitted", "Total Days", "Consistency %"])
 
-    # Count valid daily sheets only
     valid_days = [ws for ws in sheet.worksheets() if is_valid_day_sheet(ws.title)]
     total_days = len(valid_days)
 
@@ -145,7 +150,8 @@ async def summarize(ctx):
     for uname in users:
         submitted_days = 0
         for ws in valid_days:
-            if uname in ws.col_values(2):
+            names = ws.col_values(2)
+            if uname in names:
                 submitted_days += 1
 
         consistency = (submitted_days / total_days * 100) if total_days > 0 else 0
@@ -153,8 +159,9 @@ async def summarize(ctx):
 
     await ctx.reply(f"📊 Summary created: **{sheet_title}** 🎯")
 
+
 # ---------- DM Reminder ----------
-@tasks.loop(time=datetime.time(hour=22, minute=0))  # 10PM IST
+@tasks.loop(time=datetime.time(hour=22, minute=0))
 async def daily_reminder():
     for uname in registered_users:
         if uname not in submissions_today:
@@ -166,6 +173,6 @@ async def daily_reminder():
                     pass
     submissions_today.clear()
 
-TOKEN = os.getenv("TOKEN")
 
+TOKEN = os.getenv("TOKEN")
 bot.run(TOKEN)
