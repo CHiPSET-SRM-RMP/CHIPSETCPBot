@@ -1,6 +1,5 @@
 discord.py
 gspread
 oauth2client
-flask
+google-api-python-client
 requests
-pyngrok

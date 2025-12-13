@@ -4,14 +4,12 @@ import os
 import datetime
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseUpload
 import json
 import requests
 import uuid
-from flask import Flask, send_file, abort
-import threading
-from pathlib import Path
-import subprocess
-import time
+import io
 
 # ---------- Google Sheets Setup ----------
 SHEET_ID = "1qPoJ0uBdVCQZMZYWRS6Bt60YjJnYUkD4OePSTRMiSrI"
@@ -21,99 +19,115 @@ scope = [
     "https://www.googleapis.com/auth/drive"
 ]
 
+# Google Sheets credentials
 google_creds_json = os.getenv("GOOGLE_CREDS")
 
 if google_creds_json:
     google_creds = json.loads(google_creds_json)
-    creds = ServiceAccountCredentials.from_json_keyfile_dict(google_creds, scope)
+    sheets_creds = ServiceAccountCredentials.from_json_keyfile_dict(google_creds, scope)
 else:
-    creds = ServiceAccountCredentials.from_json_keyfile_name("service_account.json", scope)
+    sheets_creds = ServiceAccountCredentials.from_json_keyfile_name("service_account.json", scope)
 
-client = gspread.authorize(creds)
+client = gspread.authorize(sheets_creds)
 sheet = client.open_by_key(SHEET_ID)
 
-# ---------- Flask App Setup for Image Serving ----------
-app = Flask(__name__)
-IMAGES_DIR = Path("uploaded_images")
-IMAGES_DIR.mkdir(exist_ok=True)
+# ---------- Google Drive Setup for Image Storage ----------
+# Separate credentials for Drive (can be same or different from Sheets)
+drive_creds_json = os.getenv("DRIVE_CREDS")
 
-# Ngrok setup for public tunnel
-PUBLIC_URL = None  # Will be set after ngrok starts
-
-@app.route('/image/<filename>')
-def serve_image(filename):
-    """Serve uploaded images"""
-    image_path = IMAGES_DIR / filename
-    if image_path.exists():
-        return send_file(image_path)
-    else:
-        abort(404)
-
-def start_ngrok():
-    """Start ngrok tunnel and get public URL"""
-    global PUBLIC_URL
+if drive_creds_json:
+    drive_creds_dict = json.loads(drive_creds_json)
+    drive_creds = ServiceAccountCredentials.from_json_keyfile_dict(drive_creds_dict, scope)
+else:
+    # Try to load from drive_service_account.json, fallback to service_account.json
     try:
-        # Start ngrok tunnel
-        port = int(os.getenv("PORT", 5000))
-        process = subprocess.Popen(
-            ["ngrok", "http", str(port), "--log=stdout"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True
-        )
-        
-        # Wait a bit for ngrok to start
-        time.sleep(3)
-        
-        # Get the public URL from ngrok API
-        response = requests.get("http://localhost:4040/api/tunnels")
-        tunnels = response.json()["tunnels"]
-        
-        for tunnel in tunnels:
-            if tunnel["proto"] == "https":
-                PUBLIC_URL = tunnel["public_url"]
-                break
-        
-        if not PUBLIC_URL and tunnels:
-            PUBLIC_URL = tunnels[0]["public_url"]
-            
-        print(f"Ngrok tunnel started: {PUBLIC_URL}")
-        return process
-        
-    except Exception as e:
-        print(f"Failed to start ngrok: {e}")
-        print("Falling back to localhost (images won't be publicly accessible)")
-        PUBLIC_URL = "http://localhost:5000"
-        return None
+        drive_creds = ServiceAccountCredentials.from_json_keyfile_name("drive_service_account.json", scope)
+    except FileNotFoundError:
+        print("drive_service_account.json not found, using service_account.json for Drive")
+        drive_creds = ServiceAccountCredentials.from_json_keyfile_name("service_account.json", scope)
 
-def run_flask():
-    """Run Flask app in a separate thread"""
-    port = int(os.getenv("PORT", 5000))
-    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
+drive_service = build('drive', 'v3', credentials=drive_creds)
 
-def download_and_store_image(attachment_url):
-    """Download image from Discord and store locally"""
+# Create or get the folder for bot images
+def get_or_create_drive_folder():
+    """Get or create a folder in Google Drive for storing images"""
+    folder_name = "ChipsetBot_Images"
+    
+    # Search for existing folder
+    query = f"name='{folder_name}' and mimeType='application/vnd.google-apps.folder' and trashed=false"
+    results = drive_service.files().list(q=query, spaces='drive', fields='files(id, name)').execute()
+    folders = results.get('files', [])
+    
+    if folders:
+        return folders[0]['id']
+    
+    # Create new folder if it doesn't exist
+    file_metadata = {
+        'name': folder_name,
+        'mimeType': 'application/vnd.google-apps.folder'
+    }
+    folder = drive_service.files().create(body=file_metadata, fields='id').execute()
+    print(f"Created new folder: {folder_name}")
+    return folder.get('id')
+
+DRIVE_FOLDER_ID = None  # Will be set on bot startup
+
+def upload_to_drive(attachment_url):
+    """Download image from Discord and upload to Google Drive"""
     try:
-        # Generate unique filename
-        file_extension = attachment_url.split('.')[-1].split('?')[0]
-        if file_extension not in ['png', 'jpg', 'jpeg', 'gif', 'webp']:
-            file_extension = 'png'  # default extension
-        
-        unique_filename = f"{uuid.uuid4()}.{file_extension}"
-        file_path = IMAGES_DIR / unique_filename
-        
-        # Download the image
+        # Download the image from Discord
         response = requests.get(attachment_url, stream=True)
         response.raise_for_status()
         
-        with open(file_path, 'wb') as f:
-            for chunk in response.iter_content(chunk_size=8192):
-                f.write(chunk)
+        # Get file extension
+        file_extension = attachment_url.split('.')[-1].split('?')[0]
+        if file_extension not in ['png', 'jpg', 'jpeg', 'gif', 'webp']:
+            file_extension = 'png'
         
-        # Return the public URL
-        return f"{PUBLIC_URL}/image/{unique_filename}"
+        # Generate unique filename
+        unique_filename = f"{uuid.uuid4()}.{file_extension}"
+        
+        # Determine MIME type
+        mime_types = {
+            'png': 'image/png',
+            'jpg': 'image/jpeg',
+            'jpeg': 'image/jpeg',
+            'gif': 'image/gif',
+            'webp': 'image/webp'
+        }
+        mime_type = mime_types.get(file_extension, 'image/png')
+        
+        # Upload to Google Drive
+        file_metadata = {
+            'name': unique_filename,
+            'parents': [DRIVE_FOLDER_ID]
+        }
+        
+        media = MediaIoBaseUpload(
+            io.BytesIO(response.content),
+            mimetype=mime_type,
+            resumable=True
+        )
+        
+        file = drive_service.files().create(
+            body=file_metadata,
+            media_body=media,
+            fields='id, webViewLink, webContentLink'
+        ).execute()
+        
+        file_id = file.get('id')
+        
+        # Make the file publicly accessible
+        drive_service.permissions().create(
+            fileId=file_id,
+            body={'type': 'anyone', 'role': 'reader'}
+        ).execute()
+        
+        # Return direct link to image
+        return f"https://drive.google.com/uc?export=view&id={file_id}"
+        
     except Exception as e:
-        print(f"Error downloading image: {e}")
+        print(f"Error uploading to Drive: {e}")
         return None
 
 registered_users = {}  # {discord_username: real_name}
@@ -154,17 +168,14 @@ def get_today_sheet():
 
 @bot.event
 async def on_ready():
+    global DRIVE_FOLDER_ID
     load_users()
     
-    # Start ngrok tunnel
-    ngrok_process = start_ngrok()
-    
-    # Start Flask server in background thread
-    flask_thread = threading.Thread(target=run_flask, daemon=True)
-    flask_thread.start()
+    # Initialize Google Drive folder
+    DRIVE_FOLDER_ID = get_or_create_drive_folder()
     
     print(f"Bot Ready ✔: {bot.user}")
-    print(f"Image server running at: {PUBLIC_URL}")
+    print(f"Google Drive folder ready for image storage")
     daily_reminder.start()
 
 
@@ -211,11 +222,11 @@ async def submit(ctx, *, problem_name="No Name"):
     if not ctx.message.attachments:
         return await ctx.reply("⚠️ Attach screenshot also!")
 
-    # Download and store the image
-    await ctx.reply("📥 Uploading your image...")
+    # Upload image to Google Drive
+    await ctx.reply("📥 Uploading your image to Google Drive...")
     
     attachment_url = ctx.message.attachments[0].url
-    permanent_url = download_and_store_image(attachment_url)
+    permanent_url = upload_to_drive(attachment_url)
     
     if not permanent_url:
         return await ctx.reply("❌ Failed to upload image. Try again!")
@@ -226,11 +237,11 @@ async def submit(ctx, *, problem_name="No Name"):
     ws.append_row([
         str(datetime.datetime.now().date()),
         uname,
-        permanent_url,  # Use permanent URL instead of Discord CDN
+        permanent_url,  # Permanent Google Drive URL
         problem_name
     ])
 
-    await ctx.reply(f"🔥 Submission #{submissions_today[uname]} saved with permanent link!")
+    await ctx.reply(f"🔥 Submission #{submissions_today[uname]} saved to Google Drive!")
 
 
 # ---------- Status ----------
