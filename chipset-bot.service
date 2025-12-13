@@ -1,0 +1,17 @@
+[Unit]
+Description=CHIPSET CP Bot
+After=network.target
+
+[Service]
+Type=simple
+User=your-username
+WorkingDirectory=/path/to/your/bot
+ExecStart=/usr/bin/python3 main.py
+Restart=always
+RestartSec=10
+Environment=TOKEN=your_bot_token
+Environment=GOOGLE_CREDS=your_google_creds
+Environment=PUBLIC_URL=http://your-vm-ip:5000
+
+[Install]
+WantedBy=multi-user.target

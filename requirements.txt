@@ -2,3 +2,5 @@ discord.py
 gspread
 oauth2client
 flask
+requests
+pyngrok
