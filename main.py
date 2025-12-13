@@ -53,7 +53,7 @@ DRIVE_FOLDER_ID_CONSTANT = "1_5_PPNN9YLOOC00Z-Wg1uhmDKfcglN5G"
 
 # Create or get the folder for bot images
 def get_or_create_drive_folder():
-    """Get or create a folder in Drive for storing images"""
+    """Get the folder in Drive for storing images"""
     
     # Print service account email for debugging
     if drive_creds_json:
@@ -64,26 +64,22 @@ def get_or_create_drive_folder():
     try:
         folder = drive_service.files().get(
             fileId=DRIVE_FOLDER_ID_CONSTANT,
-            fields='id, name'
+            fields='id, name',
+            supportsAllDrives=True
         ).execute()
-        print(f"Using existing folder: {folder.get('name')} (ID: {folder.get('id')})")
+        print(f"✅ Using folder: {folder.get('name')} (ID: {folder.get('id')})")
         return folder.get('id')
     except Exception as e:
-        print(f"Could not access folder {DRIVE_FOLDER_ID_CONSTANT}: {e}")
-        print("Creating a new folder in service account's Drive...")
-        
-        # Create new folder in service account's Drive
-        folder_name = "CP_BOT_UPLOADS"
-        file_metadata = {
-            'name': folder_name,
-            'mimeType': 'application/vnd.google-apps.folder'
-        }
-        folder = drive_service.files().create(
-            body=file_metadata, 
-            fields='id'
-        ).execute()
-        print(f"Created new folder: {folder_name} (ID: {folder.get('id')})")
-        return folder.get('id')
+        print(f"❌ ERROR: Could not access folder {DRIVE_FOLDER_ID_CONSTANT}")
+        print(f"Error details: {e}")
+        print(f"\n⚠️  SOLUTION: Share the folder with the service account:")
+        print(f"   1. Open: https://drive.google.com/drive/folders/{DRIVE_FOLDER_ID_CONSTANT}")
+        print(f"   2. Click 'Share'")
+        if drive_creds_json:
+            drive_creds_dict = json.loads(drive_creds_json)
+            print(f"   3. Add this email as Editor: {drive_creds_dict.get('client_email')}")
+        print(f"   4. Restart the bot\n")
+        raise Exception("Folder access denied. Please share the folder with the service account.")
 
 DRIVE_FOLDER_ID = None  # Will be set on bot startup
 
