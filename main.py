@@ -13,7 +13,7 @@ import pytz
 
 TOKEN = os.getenv("TOKEN")
 
-VM_PUBLIC_IP = "52.172.194.26"        # 🔴 YOUR VM PUBLIC IP
+VM_PUBLIC_IP = "52.172.194.26"
 IMAGE_BASE_URL = f"http://{VM_PUBLIC_IP}:8080"
 
 IMAGE_DIR = Path("/home/Chakradhar/cpbot_images")
@@ -43,14 +43,28 @@ registered_users = {}      # {username: real_name}
 submissions_today = {}     # {username: count}
 
 # ================== HELPERS ==================
+def get_week_range(date_str):
+    d = datetime.datetime.strptime(date_str, "%Y-%m-%d").date()
+    start = d - datetime.timedelta(days=d.weekday())  # Monday
+    end = start + datetime.timedelta(days=6)          # Sunday
+    return start, end
 
 def today_str():
     return datetime.datetime.now(IST).strftime("%Y-%m-%d")
 
-def is_valid_date(name):
+def is_valid_date(date_str):
     try:
-        datetime.datetime.strptime(name, "%Y-%m-%d")
+        datetime.datetime.strptime(date_str, "%Y-%m-%d")
         return True
+    except:
+        return False
+
+def is_date_within_last_3_days(date_str):
+    try:
+        d = datetime.datetime.strptime(date_str, "%Y-%m-%d").date()
+        today = datetime.datetime.now(IST).date()
+        diff = (today - d).days
+        return 0 <= diff <= 3
     except:
         return False
 
@@ -67,12 +81,11 @@ def load_registered_users():
         if len(row) >= 2:
             registered_users[row[0]] = row[1]
 
-def get_today_sheet():
-    today = today_str()
+def get_sheet_for_date(date_str):
     try:
-        ws = sheet.worksheet(today)
+        ws = sheet.worksheet(date_str)
     except:
-        ws = sheet.add_worksheet(today, rows=300, cols=4)
+        ws = sheet.add_worksheet(date_str, rows=300, cols=4)
         ws.append_row(["Date", "Username", "Screenshot", "Problem"])
     return ws
 
@@ -125,7 +138,7 @@ async def register(ctx):
     await ctx.reply(f"✅ Registered as **{real_name}**")
 
 @bot.command()
-async def submit(ctx, *, problem="No Name"):
+async def submit(ctx, *, args=""):
     if ctx.guild:
         return await ctx.reply("Submit in DM only")
 
@@ -136,20 +149,34 @@ async def submit(ctx, *, problem="No Name"):
     if not ctx.message.attachments:
         return await ctx.reply("⚠️ Attach screenshot")
 
+    parts = args.split()
+    date_str = today_str()
+    problem = args or "No Name"
+
+    if parts and is_valid_date(parts[-1]):
+        date_str = parts[-1]
+        problem = " ".join(parts[:-1]) or "No Name"
+
+        if not is_date_within_last_3_days(date_str):
+            return await ctx.reply("❌ Allowed only **today or last 3 days**")
+
     await ctx.reply("📤 Saving image…")
 
     image_url = save_image_locally(ctx.message.attachments[0].url)
 
-    ws = get_today_sheet()
+    ws = get_sheet_for_date(date_str)
     ws.append_row([
-        today_str(),
+        date_str,
         uname,
         image_url,
         problem
     ])
 
-    submissions_today[uname] = submissions_today.get(uname, 0) + 1
-    await ctx.reply(f"🔥 Submission #{submissions_today[uname]} saved!")
+    if date_str == today_str():
+        submissions_today[uname] = submissions_today.get(uname, 0) + 1
+        await ctx.reply(f"🔥 Submission #{submissions_today[uname]} saved for **today**")
+    else:
+        await ctx.reply(f"✅ Backdated submission saved for **{date_str}**")
 
 @bot.command()
 async def status(ctx):
@@ -160,7 +187,7 @@ async def status(ctx):
     if count:
         await ctx.reply(f"✔ You submitted {count} today")
     else:
-        await ctx.reply("❌ No submissions yet")
+        await ctx.reply("❌ No submissions today")
 
 @bot.command()
 async def notcompleted(ctx):
@@ -213,7 +240,45 @@ async def summarize(ctx):
         percent = (days / total_days * 100) if total_days else 0
         sws.append_row([real_name, days, total_days, f"{percent:.1f}%"])
 
-    await ctx.reply("📊 Summary generated successfully")
+    await ctx.reply("📊 Summary generated")
+@bot.command()
+async def weeksummarize(ctx, date_str):
+    if not ctx.guild or not ctx.author.guild_permissions.administrator:
+        return await ctx.reply("Admin only")
+
+    if not is_valid_date(date_str):
+        return await ctx.reply("❌ Use YYYY-MM-DD format")
+
+    start, end = get_week_range(date_str)
+    title = f"Week-{start}_to_{end}"
+
+    try:
+        sheet.worksheet(title)
+        return await ctx.reply("Weekly summary already exists")
+    except:
+        ws = sheet.add_worksheet(title, rows=200, cols=4)
+        ws.append_row(["Real Name", "Days Submitted", "Total Days", "Consistency %"])
+
+    week_days = [
+        (start + datetime.timedelta(days=i)).strftime("%Y-%m-%d")
+        for i in range(7)
+    ]
+
+    submissions = []
+    for d in week_days:
+        try:
+            day_ws = sheet.worksheet(d)
+            submissions.append(set(day_ws.col_values(2)[1:]))
+        except:
+            submissions.append(set())
+
+    for uname, real_name in registered_users.items():
+        days = sum(1 for day in submissions if uname in day)
+        percent = (days / 7) * 100
+        ws.append_row([real_name, days, 7, f"{percent:.1f}%"])
+
+    await ctx.reply(f"📊 Weekly summary created ({start} → {end})")
+
 
 # ================== REMINDER ==================
 
