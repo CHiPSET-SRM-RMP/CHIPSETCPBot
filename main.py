@@ -595,7 +595,7 @@ async def monthly_target_check():
 @tasks.loop(time=datetime.time(hour=21, minute=45, tzinfo=IST))
 async def inactive_reminder():
     today = datetime.datetime.now(IST).date()
-    if today.toordinal() % 4 != 0:  # Every 4th day
+    if today.day % 4 != 0:  # Run on the 4th, 8th, 12th, etc. of each month
         return
 
     channel = get_announcement_channel()
